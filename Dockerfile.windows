@@ -20,7 +20,12 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags "-X github.com/Azure/mcp-kubernetes/pkg/version.GitVersion=${VERSION} -X github.com/Azure/mcp-kubernetes/pkg/version.GitCommit=${GIT_COMMIT} -X github.com/Azure/mcp-kubernetes/pkg/version.BuildMetadata=${BUILD_DATE} -X github.com/Azure/mcp-kubernetes/pkg/version.GitTreeState=${GIT_TREE_STATE}" -o mcp-kubernetes.exe ./cmd/mcp-kubernetes
+RUN powershell -Command " \
+    $env:VERSION = '%VERSION%'; \
+    $env:GIT_COMMIT = '%GIT_COMMIT%'; \
+    $env:BUILD_DATE = '%BUILD_DATE%'; \
+    $env:GIT_TREE_STATE = '%GIT_TREE_STATE%'; \
+    go build -ldflags \"-X github.com/Azure/mcp-kubernetes/pkg/version.GitVersion=$env:VERSION -X github.com/Azure/mcp-kubernetes/pkg/version.GitCommit=$env:GIT_COMMIT -X github.com/Azure/mcp-kubernetes/pkg/version.BuildMetadata=$env:BUILD_DATE -X github.com/Azure/mcp-kubernetes/pkg/version.GitTreeState=$env:GIT_TREE_STATE\" -o mcp-kubernetes.exe ./cmd/mcp-kubernetes"
 
 # Runtime stage
 FROM mcr.microsoft.com/windows/servercore:ltsc2022

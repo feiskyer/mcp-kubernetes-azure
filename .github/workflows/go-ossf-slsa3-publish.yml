@@ -74,7 +74,7 @@ jobs:
       packages: write
     needs: args
     outputs:
-      image: ${{ steps.image.outputs.image }}
+      image: ${{ steps.meta.outputs.tags }}
       digest: ${{ steps.image.outputs.digest }}
     runs-on: ubuntu-latest
     steps:
@@ -173,63 +173,55 @@ jobs:
 
           # Build with labels from metadata (newline separated)
           $labels = "${{ steps.meta.outputs.labels }}" -split "`n"
-          $docker_labels = ""
+          $docker_labels = @()
           foreach ($label in $labels) {
             $label = $label.Trim()
             if ($label -ne "") {
-              $docker_labels += " --label `"$label`""
+              $docker_labels += "--label"
+              $docker_labels += $label
             }
           }
 
-          # Build and push Windows image to temporary tags first
-          $windows_temp_tags = @()
+          $docker_tags = @()
           foreach ($tag in $clean_tags) {
-            $windows_temp_tag = "$tag-win"
-            $windows_temp_tags += $windows_temp_tag
+            $docker_tags += "-t"
+            $docker_tags += "$tag-win"
           }
 
-          $docker_tags = ""
-          foreach ($temp_tag in $windows_temp_tags) {
-            $docker_tags += " -t $temp_tag"
+          # Build Windows image with temporary tags using array parameters
+          $build_args = @(
+            "docker", "build",
+            "--platform", "windows/amd64",
+            "-f", "Dockerfile.windows"
+          )
+          $build_args += $docker_tags
+          $build_args += $docker_labels
+          $build_args += @(
+            "--build-arg", "VERSION=${{ needs.args.outputs.version }}",
+            "--build-arg", "GIT_COMMIT=${{ needs.args.outputs.commit }}",
+            "--build-arg", "BUILD_DATE=${{ needs.args.outputs.commit-date }}",
+            "--build-arg", "GIT_TREE_STATE=${{ needs.args.outputs.tree-state }}",
+            "."
+          )
+
+          Write-Host "Building Windows image with command: $($build_args -join ' ')"
+          & $build_args[0] $build_args[1..($build_args.Length-1)]
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Docker build failed with exit code $LASTEXITCODE"
+            exit $LASTEXITCODE
           }
 
-          # Build Windows image with temporary tags
-          $dockerBuildCmd="docker build --platform windows/amd64 -f Dockerfile.windows$docker_tags$docker_labels --build-arg VERSION=${{ needs.args.outputs.version }} --build-arg GIT_COMMIT=${{ needs.args.outputs.commit }} --build-arg BUILD_DATE=${{ needs.args.outputs.commit-date }} --build-arg GIT_TREE_STATE=${{ needs.args.outputs.tree-state }} ."
-          Write-Host $dockerBuildCmd
-          Invoke-Expression $dockerBuildCmd
+          # Push Windows tags
+          foreach ($tag in $clean_tags) {
+            Write-Host "Pushing Windows image: $tag-win"
+            docker push "$tag-win"
 
-          # Push Windows temp tags
-          foreach ($temp_tag in $windows_temp_tags) {
-            Write-Host "Pushing Windows image: $temp_tag"
-            docker push $temp_tag
-          }
+            # Wait for pushes to complete
+            Start-Sleep -Seconds 10
 
-          # Wait for pushes to complete
-          Start-Sleep -Seconds 10
-
-          # Now create multiarch manifests for each tag
-          for ($i = 0; $i -lt $clean_tags.Length; $i++) {
-            $final_tag = $clean_tags[$i]
-            $windows_temp_tag = $windows_temp_tags[$i]
-
-            Write-Host "Creating multiarch manifest for: $final_tag"
-
-            try {
-              # Create new manifest combining existing Linux multiarch and Windows image
-              docker manifest create $final_tag $final_tag --amend $windows_temp_tag
-
-              # Annotate Windows image
-              docker manifest annotate $final_tag $windows_temp_tag --os windows --arch amd64
-
-              # Push the multiarch manifest
-              docker manifest push $final_tag
-
-              Write-Host "✓ Successfully created multiarch manifest: $final_tag"
-            } catch {
-              Write-Error "❌ Failed to create multiarch manifest for: $final_tag"
-              Write-Error $_.Exception.Message
-              exit 1
-            }
+            docker manifest create --amend "$tag" "$tag-win"
+            docker manifest annotate --os windows --arch amd64 "$tag" "$tag-win"
+            docker manifest push "$tag"
           }
 
   # This step calls the container workflow to generate provenance and push it to

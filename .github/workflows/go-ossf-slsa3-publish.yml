@@ -123,7 +123,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-    needs: args
+    needs: [args, build-linux-image]
     runs-on: windows-latest
     steps:
       - name: Checkout the repository
@@ -147,12 +147,22 @@ jobs:
         run: |
           # Build with multiple tags from metadata (newline separated)
           $tags = "${{ steps.meta.outputs.tags }}" -split "`n"
-          $docker_tags = ""
+          $windows_tags = @()
+          $final_tags = @()
+
           foreach ($tag in $tags) {
             $tag = $tag.Trim()
             if ($tag -ne "") {
-              $docker_tags += " -t $tag"
+              $windows_tag = "$tag-windows"
+              $windows_tags += $windows_tag
+              $final_tags += $tag
             }
+          }
+
+          # Build with Windows-specific tags
+          $docker_tags = ""
+          foreach ($tag in $windows_tags) {
+            $docker_tags += " -t $tag"
           }
 
           # Build with labels from metadata (newline separated)
@@ -165,14 +175,42 @@ jobs:
             }
           }
 
+          # Build Windows image with Windows-specific tags
           $dockerBuildCmd="docker build --platform windows/amd64 -f Dockerfile.windows$docker_tags$docker_labels --build-arg VERSION=${{ needs.args.outputs.version }} --build-arg GIT_COMMIT=${{ needs.args.outputs.commit }} --build-arg BUILD_DATE=${{ needs.args.outputs.commit-date }} --build-arg GIT_TREE_STATE=${{ needs.args.outputs.tree-state }} ."
           Write-Host $dockerBuildCmd
           Invoke-Expression $dockerBuildCmd
 
-          foreach ($tag in $tags) {
-            $tag = $tag.Trim()
-            if ($tag -ne "") {
-              docker push $tag
+          # Push Windows-specific tags first
+          foreach ($tag in $windows_tags) {
+            Write-Host "Pushing Windows image: $tag"
+            docker push $tag
+          }
+
+          # Wait for pushes to complete and registry to be consistent
+          Start-Sleep -Seconds 15
+
+          # Now create multiarch manifests
+          foreach ($i in 0..($final_tags.Length - 1)) {
+            $final_tag = $final_tags[$i]
+            $windows_tag = $windows_tags[$i]
+
+            Write-Host "Creating multiarch manifest for: $final_tag"
+
+            try {
+              # Create manifest combining existing Linux multiarch image with Windows image
+              docker manifest create $final_tag $final_tag $windows_tag --amend
+
+              # Annotate Windows image
+              docker manifest annotate $final_tag $windows_tag --os windows --arch amd64
+
+              # Push the updated multiarch manifest
+              docker manifest push $final_tag
+
+              Write-Host "✓ Successfully created multiarch manifest: $final_tag"
+            } catch {
+              Write-Error "❌ Failed to create multiarch manifest for: $final_tag"
+              Write-Error $_.Exception.Message
+              exit 1
             }
           }
 
@@ -180,7 +218,7 @@ jobs:
   # This step calls the container workflow to generate provenance and push it to
   # the container registry.
   provenance:
-    needs: build-linux-image
+    needs: [build-linux-image, build-windows-image]
     permissions:
       actions: read # for detecting the Github Actions environment.
       id-token: write # for creating OIDC tokens for signing.

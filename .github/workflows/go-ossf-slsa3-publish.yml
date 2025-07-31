@@ -22,6 +22,7 @@ permissions: read-all
 env:
   IMAGE_REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  REGISTRY_IMAGE: ghcr.io/${{ github.repository }}
 jobs:
   # Generate ldflags dynamically.
   # Optional: only needed for ldflags.
@@ -165,27 +166,44 @@ jobs:
           foreach ($tag in $clean_tags) {
             Write-Host "Pushing Windows image: $tag-win"
             docker push "$tag-win"
-
-            # Wait for pushes to complete
-            Start-Sleep -Seconds 10
-
-            docker manifest create --amend "$tag" "$tag-win"
-            docker manifest annotate --os windows --arch amd64 "$tag" "$tag-win"
-            docker manifest push "$tag"
           }
+
+      - name: Export digest
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "${{ runner.temp }}/digests" -Force
+          $digest = "${{ steps.build.outputs.digest }}"
+          $digestFile = $digest -replace "sha256:", ""
+          New-Item -ItemType File -Path "${{ runner.temp }}/digests/$digestFile" -Force
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-windows-amd64
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
 
   build-linux-image:
     permissions:
       contents: read
       packages: write
-    needs: [args, build-windows-image]
-    outputs:
-      image: ${{ steps.meta.outputs.tags }}
-      digest: ${{ steps.image.outputs.digest }}
+    needs: [args]
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
     steps:
       - name: Checkout the repository
         uses: actions/checkout@85e6279cec87321a52edac9c87bce653a07cf6c2 # v2.3.4
+
+      - name: Prepare
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
@@ -201,42 +219,104 @@ jobs:
         id: meta
         uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
         with:
-          images: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY_IMAGE }}
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+      - name: Build and push by digest
         id: build
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          context: .
+          platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
           build-args: |
             VERSION=${{ needs.args.outputs.version }}
             GIT_COMMIT=${{ needs.args.outputs.commit }}
             BUILD_DATE=${{ needs.args.outputs.commit-date }}
             GIT_TREE_STATE=${{ needs.args.outputs.tree-state }}
 
+      - name: Export digest
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    permissions:
+      contents: read
+      packages: write
+    needs: [build-linux-image, build-windows-image, args]
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.tags }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Authenticate Docker
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ${{ env.IMAGE_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
+        with:
+          images: ${{ env.REGISTRY_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Create manifest list and push
+        id: build
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
+
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}
+
       - name: Output image
-        id: image
         run: |
           # NOTE: Set the image as an output because the `env` context is not
           # available to the inputs of a reusable workflow call.
-          image_name=$(echo "${IMAGE_REGISTRY}/${IMAGE_NAME}"| tr '[:upper:]' '[:lower:]')
+          image_name=$(echo "${{ env.REGISTRY_IMAGE }}" | tr '[:upper:]' '[:lower:]')
           echo "image=$image_name" >> "$GITHUB_OUTPUT"
 
   # This step calls the container workflow to generate provenance and push it to
   # the container registry.
   provenance:
-    needs: [build-linux-image, build-windows-image]
+    needs: [merge]
     permissions:
       actions: read # for detecting the Github Actions environment.
       id-token: write # for creating OIDC tokens for signing.
       packages: write # for uploading attestations.
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
     with:
-      image: ${{ needs.build-linux-image.outputs.image }}
-      digest: ${{ needs.build-linux-image.outputs.digest }}
+      image: ${{ needs.merge.outputs.image }}
+      digest: ${{ needs.merge.outputs.digest }}
       registry-username: ${{ github.actor }}
       private-repository: true
     secrets:

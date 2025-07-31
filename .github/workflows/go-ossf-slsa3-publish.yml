@@ -172,8 +172,26 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path "${{ runner.temp }}/digests" -Force
-          $digest = "${{ steps.build.outputs.digest }}"
-          $digestFile = $digest -replace "sha256:", ""
+          
+          # Get digests from the pushed images
+          $tags = "${{ steps.meta.outputs.tags }}" -split "`n"
+          $clean_tags = @()
+          
+          foreach ($tag in $tags) {
+            $tag = $tag.Trim()
+            if ($tag -ne "") {
+              $clean_tags += $tag
+            }
+          }
+          
+          # Get digest from the first pushed image
+          $firstTag = "$($clean_tags[0])-win"
+          Write-Host "Getting digest for image: $firstTag"
+          $digest = docker inspect --format='{{index .RepoDigests 0}}' $firstTag
+          $digestOnly = ($digest -split '@')[1]
+          $digestFile = $digestOnly -replace "sha256:", ""
+          
+          Write-Host "Creating digest file: $digestFile"
           New-Item -ItemType File -Path "${{ runner.temp }}/digests/$digestFile" -Force
 
       - name: Upload digest

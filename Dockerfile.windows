@@ -22,7 +22,7 @@ COPY . .
 SHELL ["powershell", "-Command", "$ErrorActionPreference = 'Stop';"]
 
 # Build the application
-RUN go build -ldflags "-X github.com/Azure/mcp-kubernetes/pkg/version.GitVersion=$env:VERSION -X github.com/Azure/mcp-kubernetes/pkg/version.GitCommit=$env:GIT_COMMIT -X github.com/Azure/mcp-kubernetes/pkg/version.BuildMetadata=$env:BUILD_DATE -X github.com/Azure/mcp-kubernetes/pkg/version.GitTreeState=$env:GIT_TREE_STATE" -o mcp-kubernetes.exe ./cmd/mcp-kubernetes
+RUN go build -ldflags \"-X github.com/Azure/mcp-kubernetes/pkg/version.GitVersion=$env:VERSION -X github.com/Azure/mcp-kubernetes/pkg/version.GitCommit=$env:GIT_COMMIT -X github.com/Azure/mcp-kubernetes/pkg/version.BuildMetadata=$env:BUILD_DATE -X github.com/Azure/mcp-kubernetes/pkg/version.GitTreeState=$env:GIT_TREE_STATE\" -o mcp-kubernetes.exe ./cmd/mcp-kubernetes
 
 # Runtime stage
 FROM mcr.microsoft.com/windows/servercore:ltsc2022

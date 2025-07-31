@@ -172,25 +172,25 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path "${{ runner.temp }}/digests" -Force
-          
+
           # Get digests from the pushed images
           $tags = "${{ steps.meta.outputs.tags }}" -split "`n"
           $clean_tags = @()
-          
+
           foreach ($tag in $tags) {
             $tag = $tag.Trim()
             if ($tag -ne "") {
               $clean_tags += $tag
             }
           }
-          
+
           # Get digest from the first pushed image
           $firstTag = "$($clean_tags[0])-win"
           Write-Host "Getting digest for image: $firstTag"
           $digest = docker inspect --format='{{index .RepoDigests 0}}' $firstTag
           $digestOnly = ($digest -split '@')[1]
           $digestFile = $digestOnly -replace "sha256:", ""
-          
+
           Write-Host "Creating digest file: $digestFile"
           New-Item -ItemType File -Path "${{ runner.temp }}/digests/$digestFile" -Force
 
@@ -244,6 +244,7 @@ jobs:
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
+          tags: ${{ steps.meta.outputs.tags }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true
